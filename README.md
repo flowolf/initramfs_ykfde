@@ -12,10 +12,9 @@ supported by yubikeys after version 2.2
 # Features of this script:
  * it is capable of using the yubikey challenge response to generate a password
  * it generates a new key on every bootup. (the challenge is changed)
- * it supports yubikey's slot 2
+ * it supports yubikey's slot 1 or 2 
  * it supports two factor authentication (combining a user password and the
-   challenge response from the yuibkey.
-
+   challenge response from the yubikey.
 
 ### you will need (in your initramfs and in your system)
 *      ykchalresp (found on github, it needs to be available in your initramfs
