@@ -39,16 +39,25 @@ supported by yubikeys after version 2.2
 to initialize your crypt device to work with this script do the following:
 we will use slot 3 for the challenge response key, you can change that to any
 available slot.
+
  $ cryptsetup luksKillSlot /dev/yourdev 3 (optional, if you had a key there)
+
  $ mount /boot
+
  $ uuidgen > /boot/crypt-challenge
+
  $ ykchalresp -2 "`cat /boot/crypt-challenge `" > ~/key 
+
 we assume that ~/key is located on your encrypted partition, otherwise this
 might be a security risk!
+
  $ vi ~/key (add a userpassword in front of the string)
+
 you will type in this password in at every bootup, the script will combine 
 your passphrase and the yubikey response.
+
  $ cryptsetup luksAddKey --key-slot 3 /dev/sda2 ~/key
+
  $ rm ~/key
 
 
