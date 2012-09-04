@@ -1,0 +1,221 @@
+#!/bin/sh
+# 
+################################################################################
+# licensed under the                                                           #
+# The MIT License                                                              #
+#                                                                              #
+# Copyright (c) <2012> <flowolf[at]klienux[dot]org>                            #
+#                                                                              #
+# Permission is hereby granted, free of charge, to any person obtaining a copy #
+# of this software and associated documentation files (the "Software"), to     #
+# deal in the Software without restriction, including without limitation the   #
+# rights to use, copy, modify, merge, publish, distribute, sublicense, and/or  #
+# sell copies of the Software, and to permit persons to whom the Software is   #
+# furnished to do so,                                                          #
+# subject to the following conditions:                                         #
+#                                                                              #
+# The above copyright notice and this permission notice shall be included in   #
+# all copies or substantial portions of the Software.                          #
+#                                                                              #
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR   #
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,     #
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE  #
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER       #
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING      #
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS #
+# IN THE SOFTWARE.                                                             #
+#                                                                              #
+################################################################################
+
+# this script is meant as inspirational guideline on how one could realize 
+# full disk encryption using a yubikey and the challenge response feature
+# supported by yubikeys after version 2.2 
+# (http://www.yubico.com/challenge-response)
+# the script can be found on github:
+# ( http://github.com/flowolf/initramfs_ykfde )
+#
+# it is highly recommended to backup the LUKS header of your crypt volumes!
+# do this with:
+#  $ cryptsetup luksHeaderBackup /dev/yourdev --header-backup-file bla.luks 
+#
+# restore it with:
+#  $ cryptsetup luksHeaderRestore /dev/yourdev --header-backup-file bla.luks
+# CAUTION! this will overwrite all keyslots of your device! so you better 
+#          remember your old passphrase!
+#
+# you will need 
+#      ykchalresp (found on github, it needs to be available in your initramfs
+#          https://github.com/Yubico/yubikey-personalization)
+#      uuidgen 
+#      lvm
+#      cryptsetup
+#
+# Features of this script:
+# * it is capable of using the yubikey challenge response to generate a password
+# * it generates a new key on every bootup. (the challenge is changed)
+# * it supports yubikey's slot 2
+#
+# How this script works:
+# your system boots into initramfs and runs 'init' (this script), your kernel
+# has to deliver all dependencies, as this script is very basic.
+# it further requests the challenge, stored on boot (on /boot/crypt-challenge)
+# and combines the response with a usergiven password (that you have to provide)
+# after unlocking your partitions it generates a new challenge, saves it to the
+# beforementioned file and sets the new combination of user password and 
+# response as new password on slot "3" of the luks header. the new password is
+# temporaly written to /newroot/root/key which is assumed to be on your 
+# encrypted device.
+#
+# to initialize your crypt device to work with this script do the following:
+# we will use slot 3 for the challenge response key, you can change that to any
+# available slot.
+#  $ cryptsetup luksKillSlot /dev/yourdev 3 (optional, if you had a key there)
+#  $ mount /boot
+#  $ uuidgen > /boot/crypt-challenge
+#  $ ykchalresp -2 "`cat /boot/crypt-challenge `" > ~/key 
+# we assume that ~/key is located on your encrypted partition, otherwise this
+# might be a security risk!
+#  $ vi ~/key (add a userpassword in front of the string)
+# you will type in this password in at every bootup, the script will combine 
+# your passphrase and the yubikey response.
+#  $ cryptsetup luksAddKey --key-slot 3 /dev/sda2 ~/key
+#  $ rm ~/key
+
+# yubikey slot, use 1 or 2.
+ykslot=2
+# slot for key of cryptsetup header
+# initialize key with: 
+keyslot=3
+# path to store the challenge in
+path="/boot/crypt-challenge"
+dev="/dev/sda2" # your crypt device
+# turn loggin on to debug (on: 1; off: 0 )
+log=0
+echo="/bin/echo"
+cat="/bin/cat"
+ykchalresp="/bin/ykchalresp"
+uuidgen="/bin/uuidgen"
+# be careful not to use an unencrypted device for this:
+keyfile="/newroot/root/key" # temporary path
+name="vault" # the name to be used by lvm
+pw="" # leave empty
+# this is for falling back on unlocking without yubikey
+# it requires another valid keyslot in your luks header.
+# we recommend a VERY LONG password (100 chars or more)
+noyubikey=false
+
+mount -t proc none /proc
+CMDLINE='cat /proc/cmdline'
+mount -t sysfs none /sys
+# with devtmpfs in the kernel!
+mount -t devtmpfs none /dev
+
+# important for crypt callenge and log ;)
+mount /dev/sda1 /boot
+# wait a litte to avoid trailing kernel output
+sleep 3
+
+#rescue function in case something is going wrong
+rescue_shell(){
+	echo "Something went wrong. Dropping you to a shell."
+	busybox --install -s
+	exec /bin/sh
+}
+
+log(){
+  if [ $log = "1" ]; then
+    echo $1
+    echo $1 >> /boot/mylog.log
+  fi
+}
+
+sleep 5
+clear
+# message for finder
+#cat /etc/msg # add a message for ways to contact you in your initramfs
+
+log "challenge: `cat $path`"
+clear
+sec="$(/bin/ykchalresp -${ykslot} "`cat ${path}`" 2>/dev/null || true)"
+if [ -z "$sec" ]; then
+  echo "Please insert yubikey and press enter to continue" >&2
+  read a
+  sec="$(/bin/ykchalresp -${ykslot} "`cat ${path}`" 2>/dev/null || true)"
+fi
+if [ -z "$sec" ]; then
+  noyubikey=true
+fi
+
+pwgiven=false
+echo "Please enter your password"
+while [ ! $pwgiven = "true" ]; do
+  if [ $noyubikey = "true" ]; then
+    /bin/cryptsetup luksOpen ${dev} $name || rescue_shell
+  else
+   read -sp "pass: " pw
+   combinedsec="${pw}${sec}"
+   echo $combinedsec | cryptsetup --key-file=- luksOpen ${dev} $name 
+  fi
+  if [ $? = "0" ]; then
+    pwgiven=true
+    log "crypt device unlocked"
+  fi
+done 
+
+# in this case the crypt device has a lvm volume inside
+# you can change this to whatever partition setup you have
+
+#lvm
+/bin/lvm vgscan
+/bin/lvm vgchange -ay vg || rescue_shell
+
+#root fs
+mount /dev/mapper/vg-root /newroot || rescue_shell
+
+# if we boot without yubikey we cannot set a new challenge
+if [ $noyubikey = "false" ]; then
+ oldchallenge="`cat ${path}`"
+
+  # the code below should be run on an encrypted FS
+  # as the key gets to be put in a file.
+  uuidgen > ${path}
+  if [ $? != "0" ]; then
+    # keyupdate went wrong, reestablish old challenge
+    echo $oldchallenge > ${path}
+    log "ERROR: getting uuid went wrong";
+  fi
+  sec="$(/bin/ykchalresp -${ykslot} "`cat ${path}`")" 
+  if [ -z "$sec" ]; then
+    echo "Please insert yubikey and press enter to continue" >&2
+    read a
+    sec="$(/bin/ykchalresp -${ykslot} "`cat ${path}`" 2>/dev/null || true)"
+  fi
+  if [ -z "$sec" ]; then
+    log "yubikey response empty. abort!"
+    echo $oldchallenge > ${path}
+    exit 1
+  fi
+  newkey=${pw}${sec}
+  echo $newkey > ${keyfile}
+  log "new challenge: `cat $path`"
+  echo $combinedsec | cryptsetup --key-file=- luksChangeKey --key-slot ${keyslot} ${dev} ${keyfile}
+  if [ $? != "0" ]; then
+    # keyupdate went wrong, reestablish old challenge
+    echo $oldchallenge > ${path}
+    log "ERROR: update of new key went wrong" ;
+  fi 
+  rm ${keyfile}
+
+fi # noyubikey
+
+#mount -o remount,ro /newroot || rescue_shell
+
+#unmount pseudo FS
+umount /sys
+umount /proc
+umount /dev
+umount /boot
+
+#root switch
+exec /bin/busybox switch_root /newroot /sbin/init ${CMDLINE}
+
